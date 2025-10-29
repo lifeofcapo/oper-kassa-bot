@@ -5,55 +5,66 @@ import logging
 from datetime import datetime
 import telebot
 from telebot import types
-import json
+import signal
+import sys
+from threading import Thread
+import time
+from dotenv import load_dotenv
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8257056060:AAEJjN5nJ2deXu8KfvmeCoFfi40NqoSkPr0')
-BOT_PASSWORD = os.getenv('BOT_PASSWORD', 'operkassa2020')  
+load_dotenv()
 
-#лог
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+BOT_PASSWORD = os.getenv('BOT_PASSWORD')
+
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN не установлен в переменных окружения!")
+if not BOT_PASSWORD:
+    raise ValueError("BOT_PASSWORD не установлен в переменных окружения!")
+
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('bot.log', encoding='utf-8')
+        logging.StreamHandler()
     ]
 )
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-# Словарь для хранения авторизованных пользователей
 authorized_users = {}
 
 try:
-    if os.path.exists("serviceAccountKey.json"):
-        cred = credentials.Certificate("serviceAccountKey.json")
-    else:
-        service_account_info = {
-            "type": "service_account",
-            "project_id": os.getenv('FIREBASE_PROJECT_ID', 'oper-kassa'),
-            "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID', ''),
-            "private_key": os.getenv('FIREBASE_PRIVATE_KEY', '').replace('\\n', '\n'),
-            "client_email": os.getenv('FIREBASE_CLIENT_EMAIL', ''),
-            "client_id": os.getenv('FIREBASE_CLIENT_ID', ''),
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_CERT_URL', '')
-        }
-        cred = credentials.Certificate(service_account_info)
+    service_account_info = {
+        "type": "service_account",
+        "project_id": os.getenv('FIREBASE_PROJECT_ID'),
+        "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID'),
+        "private_key": os.getenv('FIREBASE_PRIVATE_KEY', '').replace('\\n', '\n'),
+        "client_email": os.getenv('FIREBASE_CLIENT_EMAIL'),
+        "client_id": os.getenv('FIREBASE_CLIENT_ID'),
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_CERT_URL')
+    }
+    
+    missing_fields = [k for k, v in service_account_info.items() if not v]
+    if missing_fields:
+        raise ValueError(f"Отсутствуют обязательные поля Firebase: {', '.join(missing_fields)}")
+    
+    cred = credentials.Certificate(service_account_info)
     
     firebase_admin.initialize_app(cred, {
         'databaseURL': 'https://oper-kassa-default-rtdb.europe-west1.firebasedatabase.app'
     })
-    logging.info("Firebase initialized successfully")
+    logging.info("✅ Firebase инициализирован успешно")
 except Exception as e:
-    logging.error(f"Firebase initialization failed: {e}")
+    logging.error(f"❌ Ошибка инициализации Firebase: {e}")
+    raise
 
 class CurrencyManager:
     def __init__(self):
         self.currencies_structure = [
-            {'code': 'USD_WHITE', 'flag': 'us', 'name': 'Доллар США (белый)', 'showRates': True},
             {'code': 'USD_BLUE', 'flag': 'us', 'name': 'Доллар США (синий)', 'showRates': True},
+            {'code': 'USD_WHITE', 'flag': 'us', 'name': 'Доллар США (белый)', 'showRates': True},
             {'code': 'EUR', 'flag': 'eu', 'name': 'Евро', 'showRates': True},
             {'code': 'GBP', 'flag': 'gb', 'name': 'Фунт стерлингов', 'showRates': False},
             {'code': 'CNY', 'flag': 'cn', 'name': 'Китайский юань', 'showRates': False},
@@ -66,12 +77,11 @@ class CurrencyManager:
             ref = db.reference('/currencies')
             rates = ref.get()
             if rates is None:
-                # Если в Firebase нет данных, инициализируем базовыми
                 self.initialize_rates()
                 return self.get_current_rates()
             return rates
         except Exception as e:
-            logging.error(f"Error getting rates: {e}")
+            logging.error(f"Ошибка получения курсов: {e}")
             return []
     
     def initialize_rates(self):
@@ -98,9 +108,9 @@ class CurrencyManager:
                 initial_rates.append(curr)
             
             ref.set(initial_rates)
-            logging.info("Initial rates set in Firebase")
+            logging.info("Базовые курсы установлены в Firebase")
         except Exception as e:
-            logging.error(f"Error initializing rates: {e}")
+            logging.error(f"Ошибка инициализации курсов: {e}")
     
     def update_currency_rate(self, currency_code, buy_rate, sell_rate):
         """Обновить курс конкретной валюты"""
@@ -116,6 +126,7 @@ class CurrencyManager:
                     currency['updated'] = datetime.now().isoformat()
                     updated = True
                     break
+            
             if not updated:
                 for base_currency in self.currencies_structure:
                     if base_currency['code'] == currency_code:
@@ -127,11 +138,11 @@ class CurrencyManager:
                         break
             
             ref.set(current_rates)
-            logging.info(f"Updated {currency_code}: buy={buy_rate}, sell={sell_rate}")
+            logging.info(f"Обновлено {currency_code}: покупка={buy_rate}, продажа={sell_rate}")
             return True
             
         except Exception as e:
-            logging.error(f"Error updating rate: {e}")
+            logging.error(f"Ошибка обновления курса: {e}")
             return False
 
 currency_manager = CurrencyManager()
@@ -294,7 +305,6 @@ def handle_edit_currency(call):
     
     currency_code = call.data.replace('edit_', '')
     
-    # Получаем информацию о валюте
     rates = currency_manager.get_current_rates()
     currency_info = next((c for c in rates if c['code'] == currency_code), None)
     
@@ -325,7 +335,6 @@ def process_buy_rate(message, currency_code):
             bot.register_next_step_handler(message, process_buy_rate, currency_code)
             return
         
-        # Запрашиваем курс продажи
         msg = bot.send_message(
             message.chat.id,
             f"Теперь введите курс *продажи* (только число, например: 97.8):",
@@ -357,11 +366,9 @@ def process_sell_rate(message, currency_code, buy_rate):
             bot.register_next_step_handler(message, process_sell_rate, currency_code, buy_rate)
             return
         
-        # Сохраняем курсы в Firebase
         success = currency_manager.update_currency_rate(currency_code, buy_rate, sell_rate)
         
         if success:
-            # Получаем обновленную информацию о валюте
             rates = currency_manager.get_current_rates()
             currency_info = next((c for c in rates if c['code'] == currency_code), None)
             
@@ -389,15 +396,13 @@ def handle_cancel(call):
 @require_auth
 def handle_update_all(message):
     """Обновить все курсы"""
-    # Здесь можно добавить логику массового обновления
-    # Например, увеличение всех курсов на определенный процент
     bot.send_message(message.chat.id, "🔄 Функция массового обновления в разработке")
 
 @bot.message_handler(func=lambda message: message.text == '❓ Помощь')
 @bot.message_handler(commands=['help'])
 def send_help(message):
     """Справка по командам"""
-    help_text = """
+    help_text = f"""
 💱 *Доступные команды:*
 
 */start* - Главное меню
@@ -422,8 +427,6 @@ def send_help(message):
 6. Курсы автоматически обновятся на сайте
 
 *Примечание:* Курс продажи должен быть выше курса покупки.
-
-*Пароль:* `oper2025`
 """
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
@@ -436,17 +439,35 @@ def handle_other_messages(message):
             "🤔 Не понимаю команду. Используйте кнопки меню или /help для справки."
         )
 
+def signal_handler(sig, frame):
+    """Обработчик сигналов для graceful shutdown"""
+    logging.info("Получен сигнал остановки. Завершение работы бота...")
+    bot.stop_polling()
+    sys.exit(0)
+
+def keep_alive():
+    """Функция для поддержания активности бота"""
+    while True:
+        logging.info("🤖 Бот активен...")
+        time.sleep(300)
+
 if __name__ == "__main__":
-    logging.info("Currency bot started...")
-    logging.info(f"Bot password: {BOT_PASSWORD}")
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    logging.info("🚀 Бот запущен и готов к работе...")
     
     try:
         rates = currency_manager.get_current_rates()
-        logging.info(f"Loaded {len(rates)} currencies from Firebase")
+        logging.info(f"📊 Загружено {len(rates)} валют из Firebase")
     except Exception as e:
-        logging.error(f"Failed to load currencies: {e}")
+        logging.error(f"❌ Не удалось загрузить валюты: {e}")
+    
+    keep_alive_thread = Thread(target=keep_alive, daemon=True)
+    keep_alive_thread.start()
     
     try:
-        bot.infinity_polling()
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except Exception as e:
-        logging.error(f"Bot stopped with error: {e}")
+        logging.error(f"❌ Бот остановлен с ошибкой: {e}")
+        sys.exit(1)

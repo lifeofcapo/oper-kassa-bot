@@ -1,5 +1,28 @@
-serviceAccountKey.json
+# Environment variables
 .env
-*.log
+*.env
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Firebase
+serviceAccountKey.json
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
