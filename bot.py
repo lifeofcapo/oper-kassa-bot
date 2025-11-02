@@ -10,16 +10,10 @@ import sys
 from threading import Thread
 import time
 from dotenv import load_dotenv
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
 
 load_dotenv()
-
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-BOT_PASSWORD = os.getenv('BOT_PASSWORD')
-
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN не установлен в переменных окружения!")
-if not BOT_PASSWORD:
-    raise ValueError("BOT_PASSWORD не установлен в переменных окружения!")
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -29,36 +23,32 @@ logging.basicConfig(
     ]
 )
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-authorized_users = {}
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+BOT_PASSWORD = os.getenv('BOT_PASSWORD')
+MONGO_URI = os.getenv("MONGO_URI")
+
+if not MONGO_URI:
+    raise ValueError("MONGO_URI не установлен в .env!")
+
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN не установлен в переменных окружения!")
+if not BOT_PASSWORD:
+    raise ValueError("BOT_PASSWORD не установлен в переменных окружения!")
+
+client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
+db = client["operkassa_db"]  # имя базы
+rates_collection = db["rates"]  # коллекция с курсами
 
 try:
-    service_account_info = {
-        "type": "service_account",
-        "project_id": os.getenv('FIREBASE_PROJECT_ID'),
-        "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID'),
-        "private_key": os.getenv('FIREBASE_PRIVATE_KEY', '').replace('\\n', '\n'),
-        "client_email": os.getenv('FIREBASE_CLIENT_EMAIL'),
-        "client_id": os.getenv('FIREBASE_CLIENT_ID'),
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_CERT_URL')
-    }
-    
-    missing_fields = [k for k, v in service_account_info.items() if not v]
-    if missing_fields:
-        raise ValueError(f"Отсутствуют обязательные поля Firebase: {', '.join(missing_fields)}")
-    
-    cred = credentials.Certificate(service_account_info)
-    
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://oper-kassa-default-rtdb.europe-west1.firebasedatabase.app'
-    })
-    logging.info("✅ Firebase инициализирован успешно")
+    client.admin.command("ping")
+    logging.info("✅ Успешно подключено к MongoDB Atlas!")
 except Exception as e:
-    logging.error(f"❌ Ошибка инициализации Firebase: {e}")
+    logging.error(f"❌ Ошибка подключения к MongoDB: {e}")
     raise
+
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+authorized_users = {}
 
 class CurrencyManager:
     def __init__(self):
@@ -70,77 +60,58 @@ class CurrencyManager:
             {'code': 'CNY', 'flag': 'cn', 'name': 'Китайский юань', 'showRates': False},
             {'code': 'RUB', 'flag': 'ru', 'name': 'Российский рубль', 'showRates': True}
         ]
-    
+
     def get_current_rates(self):
-        """Получить текущие курсы из Firebase"""
         try:
-            ref = db.reference('/currencies')
-            rates = ref.get()
-            if rates is None:
+            rates = list(rates_collection.find({}, {"_id": 0}))
+            if not rates:
                 self.initialize_rates()
                 return self.get_current_rates()
             return rates
         except Exception as e:
             logging.error(f"Ошибка получения курсов: {e}")
             return []
-    
+
     def initialize_rates(self):
-        """Инициализировать Firebase базовыми курсами"""
         try:
-            ref = db.reference('/currencies')
             initial_rates = []
             for currency in self.currencies_structure:
                 curr = currency.copy()
                 if curr['showRates']:
-                    if curr['code'] == 'USD_WHITE':
-                        curr.update({'buy': 95.5, 'sell': 97.8})
-                    elif curr['code'] == 'USD_BLUE':
-                        curr.update({'buy': 94.0, 'sell': 96.5})
-                    elif curr['code'] == 'EUR':
-                        curr.update({'buy': 105.2, 'sell': 107.9})
-                    elif curr['code'] == 'RUB':
-                        curr.update({'buy': 1.0, 'sell': 1.0})
-                    else:
-                        curr.update({'buy': 0.0, 'sell': 0.0})
+                    default = {
+                        'USD_WHITE': (80.5, 81.5),
+                        'USD_BLUE': (81.5, 82.2),
+                        'EUR': (94.5, 96.0),
+                        'RUB': (1.0, 1.0)
+                    }
+                    curr.update({'buy': default.get(curr['code'], (0.0, 0.0))[0],
+                                 'sell': default.get(curr['code'], (0.0, 0.0))[1]})
                 else:
                     curr.update({'buy': 0.0, 'sell': 0.0})
                 curr['updated'] = datetime.now().isoformat()
                 initial_rates.append(curr)
-            
-            ref.set(initial_rates)
-            logging.info("Базовые курсы установлены в Firebase")
+
+            rates_collection.delete_many({})
+            rates_collection.insert_many(initial_rates)
+            logging.info("✅ Базовые курсы сохранены в MongoDB")
         except Exception as e:
             logging.error(f"Ошибка инициализации курсов: {e}")
-    
+
     def update_currency_rate(self, currency_code, buy_rate, sell_rate):
-        """Обновить курс конкретной валюты"""
         try:
-            ref = db.reference('/currencies')
-            current_rates = ref.get() or []
-            
-            updated = False
-            for currency in current_rates:
-                if currency['code'] == currency_code:
-                    currency['buy'] = float(buy_rate)
-                    currency['sell'] = float(sell_rate)
-                    currency['updated'] = datetime.now().isoformat()
-                    updated = True
-                    break
-            
-            if not updated:
-                for base_currency in self.currencies_structure:
-                    if base_currency['code'] == currency_code:
-                        new_currency = base_currency.copy()
-                        new_currency['buy'] = float(buy_rate)
-                        new_currency['sell'] = float(sell_rate)
-                        new_currency['updated'] = datetime.now().isoformat()
-                        current_rates.append(new_currency)
-                        break
-            
-            ref.set(current_rates)
-            logging.info(f"Обновлено {currency_code}: покупка={buy_rate}, продажа={sell_rate}")
+            result = rates_collection.update_one(
+                {"code": currency_code},
+                {
+                    "$set": {
+                        "buy": float(buy_rate),
+                        "sell": float(sell_rate),
+                        "updated": datetime.now().isoformat(),
+                    }
+                },
+                upsert=True
+            )
+            logging.info(f"✅ Обновлено {currency_code}: {buy_rate}/{sell_rate}")
             return True
-            
         except Exception as e:
             logging.error(f"Ошибка обновления курса: {e}")
             return False
@@ -449,7 +420,7 @@ def keep_alive():
     """Функция для поддержания активности бота"""
     while True:
         logging.info("🤖 Бот активен...")
-        time.sleep(300)
+        time.sleep(500)
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
